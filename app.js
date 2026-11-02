@@ -610,22 +610,13 @@ function renderBanner() {
 
 $('grid').addEventListener('click', (e) => {
   const tile = e.target.closest('.tile');
-  if (!tile) return;
-  if (tile.dataset.folder) {
-    const fid = tile.dataset.folder;
-    if (!state.selecting) return openFolder(fid);
-    state.selectedFolders.has(fid) ? state.selectedFolders.delete(fid) : state.selectedFolders.add(fid);
-    tile.classList.toggle('selected');
+  if (!tile || Date.now() - drag.endedAt < 400) return; // the click that ends a drag-select
+  if (state.selecting) {
+    setTileSelected(tile, !isTileSelected(tile));
     return updateSelectBar();
   }
-  const id = tile.dataset.id;
-  if (state.selecting) {
-    state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
-    tile.classList.toggle('selected');
-    updateSelectBar();
-  } else {
-    openViewer(id);
-  }
+  if (tile.dataset.folder) openFolder(tile.dataset.folder);
+  else openViewer(tile.dataset.id);
 });
 
 for (const chip of document.querySelectorAll('.chip')) {
@@ -657,6 +648,98 @@ function updateSelectBar() {
 }
 $('select-btn').addEventListener('click', () => setSelecting(!state.selecting));
 $('sel-done').addEventListener('click', () => setSelecting(false));
+
+const selectionSet = (tile) => (tile.dataset.folder ? state.selectedFolders : state.selected);
+const tileId = (tile) => tile.dataset.folder || tile.dataset.id;
+const isTileSelected = (tile) => selectionSet(tile).has(tileId(tile));
+function setTileSelected(tile, on) {
+  on ? selectionSet(tile).add(tileId(tile)) : selectionSet(tile).delete(tileId(tile));
+  tile.classList.toggle('selected', on);
+}
+
+// Drag to select, like the Photos app: in select mode, slide sideways from a tile (or drag
+// with the mouse) and every tile between it and your finger is selected, in grid order.
+// Starting on a selected tile deselects instead. Moving up/down first scrolls as normal;
+// while dragging, holding near the top or bottom of the screen scrolls the grid.
+const drag = { pending: null, active: false, tiles: [], anchor: -1, adding: true, base: null, last: -1, x: 0, y: 0, raf: 0, endedAt: 0 };
+const DRAG_START_PX = 10;
+const EDGE_PX = 90;
+
+function dragStart() {
+  drag.tiles = [...$('grid').querySelectorAll('.tile')];
+  drag.anchor = drag.tiles.indexOf(drag.pending.tile);
+  drag.adding = !isTileSelected(drag.pending.tile);
+  drag.base = drag.tiles.map(isTileSelected);
+  drag.pending = null;
+  drag.active = true;
+  drag.last = -1;
+  drag.raf = requestAnimationFrame(dragAutoScroll);
+}
+
+function dragMove(x, y) {
+  drag.x = x;
+  drag.y = y;
+  const i = drag.tiles.indexOf(document.elementFromPoint(x, y)?.closest('#grid .tile'));
+  if (i < 0 || i === drag.last) return;
+  drag.last = i;
+  const lo = Math.min(i, drag.anchor), hi = Math.max(i, drag.anchor);
+  drag.tiles.forEach((t, k) => setTileSelected(t, k >= lo && k <= hi ? drag.adding : drag.base[k]));
+  updateSelectBar();
+}
+
+function dragEnd(e) {
+  // A mouse drag ends with a click on the last tile, which must not toggle it again.
+  // (A finger drag produces no click, so a quick tap afterwards still counts.)
+  if (drag.active && e.type === 'mouseup') drag.endedAt = Date.now();
+  drag.active = false;
+  drag.pending = null;
+  cancelAnimationFrame(drag.raf);
+}
+
+function dragAutoScroll() {
+  if (!drag.active) return;
+  const bottom = innerHeight - $('selectbar').offsetHeight;
+  const speed = drag.y < EDGE_PX ? -(EDGE_PX - drag.y) / 4 : drag.y > bottom - EDGE_PX ? (drag.y - (bottom - EDGE_PX)) / 4 : 0;
+  if (speed) {
+    scrollBy(0, speed);
+    drag.last = -1; // the tile under the finger may have changed
+    dragMove(drag.x, drag.y);
+  }
+  drag.raf = requestAnimationFrame(dragAutoScroll);
+}
+
+$('grid').addEventListener('touchstart', (e) => {
+  const tile = e.target.closest('.tile');
+  drag.pending = state.selecting && tile && e.touches.length === 1
+    ? { tile, x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { passive: true });
+$('grid').addEventListener('touchmove', (e) => {
+  const t = e.touches[0];
+  if (drag.pending) {
+    const dx = Math.abs(t.clientX - drag.pending.x), dy = Math.abs(t.clientY - drag.pending.y);
+    if (dy > DRAG_START_PX && dy > dx) { drag.pending = null; return; } // vertical: let it scroll
+    if (dx < DRAG_START_PX) return;
+    dragStart();
+  }
+  if (!drag.active) return;
+  e.preventDefault(); // stop the page scrolling under the finger while selecting
+  dragMove(t.clientX, t.clientY);
+}, { passive: false });
+$('grid').addEventListener('touchend', dragEnd);
+$('grid').addEventListener('touchcancel', dragEnd);
+
+$('grid').addEventListener('mousedown', (e) => {
+  const tile = e.target.closest('.tile');
+  if (state.selecting && tile && e.button === 0) {
+    drag.pending = { tile, x: e.clientX, y: e.clientY };
+    e.preventDefault(); // no text selection while dragging
+  }
+});
+addEventListener('mousemove', (e) => {
+  if (drag.pending && Math.hypot(e.clientX - drag.pending.x, e.clientY - drag.pending.y) > DRAG_START_PX) dragStart();
+  if (drag.active) dragMove(e.clientX, e.clientY);
+});
+addEventListener('mouseup', dragEnd);
 
 $('sel-move').addEventListener('click', async () => {
   const exclude = new Set();

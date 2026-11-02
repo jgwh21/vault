@@ -248,3 +248,7 @@ body.shielded dialog, body.shielded .viewer { visibility: hidden; }
 .move-opt:hover, .move-opt:focus-visible { background: var(--surface-2); }
 .move-opt svg { flex: none; color: var(--accent); }
 #selectbar .btn { flex: 0 1 auto; }
+
+/* Drag-to-select: no iOS callout or text selection when a finger rests on a tile */
+.selecting .grid { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.selecting .tile img { -webkit-user-drag: none; pointer-events: none; }
