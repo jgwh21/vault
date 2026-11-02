@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- No network access beyond this app's own files: nothing can be sent anywhere. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Vault</title>
+  <meta name="description" content="Private, encrypted storage for your photos, videos and documents.">
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Vault">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <main id="app">
+    <!-- First run -->
+    <section id="screen-setup" class="screen gate" hidden>
+      <div class="gate-card">
+        <img src="icons/icon-192.png" alt="" class="gate-logo" width="72" height="72">
+        <h1>Create your vault</h1>
+        <p class="muted">Photos, videos and documents are encrypted on this device with a passphrase only you know. Nothing is ever uploaded.</p>
+        <form id="create-form" autocomplete="off">
+          <label>Passphrase
+            <input type="password" id="create-pass" autocomplete="new-password" minlength="10" required>
+          </label>
+          <label>Confirm passphrase
+            <input type="password" id="create-pass2" autocomplete="new-password" minlength="10" required>
+          </label>
+          <p class="hint">At least 10 characters. Four or more random words works well. <strong>If you forget it, your files cannot be recovered by anyone.</strong></p>
+          <button type="submit" class="btn primary block">Create vault</button>
+        </form>
+        <div class="divider"><span>or</span></div>
+        <button type="button" id="restore-btn" class="btn block">Restore from a backup file</button>
+      </div>
+    </section>
+
+    <!-- Locked -->
+    <section id="screen-lock" class="screen gate" hidden>
+      <div class="gate-card">
+        <img src="icons/icon-192.png" alt="" class="gate-logo" width="72" height="72">
+        <h1>Vault is locked</h1>
+        <form id="unlock-form" autocomplete="off">
+          <label class="sr-only" for="unlock-pass">Passphrase</label>
+          <input type="password" id="unlock-pass" placeholder="Passphrase" autocomplete="current-password" required>
+          <p id="unlock-error" class="error" role="alert" hidden></p>
+          <button type="submit" class="btn primary block">Unlock</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Library -->
+    <section id="screen-main" class="screen" hidden>
+      <header class="topbar">
+        <h1>Vault</h1>
+        <div class="topbar-actions">
+          <button type="button" id="select-btn" class="btn ghost">Select</button>
+          <button type="button" id="settings-btn" class="btn ghost icon" aria-label="Settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+          </button>
+          <button type="button" id="lock-btn" class="btn ghost icon" aria-label="Lock">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div id="backup-banner" class="banner" hidden>
+        <span id="backup-banner-text"></span>
+        <button type="button" id="backup-banner-btn" class="btn small primary">Back up</button>
+      </div>
+
+      <div class="toolbar">
+        <div class="chips" role="tablist" aria-label="Filter">
+          <button type="button" class="chip" data-filter="all" aria-selected="true">All</button>
+          <button type="button" class="chip" data-filter="image">Photos</button>
+          <button type="button" class="chip" data-filter="video">Videos</button>
+          <button type="button" class="chip" data-filter="docs">Documents</button>
+        </div>
+        <input type="search" id="search" placeholder="Search by name" aria-label="Search by name">
+      </div>
+
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty" hidden>
+        <p><strong>Your vault is empty.</strong></p>
+        <p class="muted">Add photos and videos from your library, or documents from Files.</p>
+      </div>
+
+      <div id="addbar" class="bottombar">
+        <button type="button" id="add-media" class="btn primary">+ Photos &amp; videos</button>
+        <button type="button" id="add-files" class="btn">+ Files</button>
+      </div>
+      <div id="selectbar" class="bottombar" hidden>
+        <span id="sel-count">0 selected</span>
+        <button type="button" id="sel-delete" class="btn danger" disabled>Delete</button>
+        <button type="button" id="sel-done" class="btn">Done</button>
+      </div>
+    </section>
+  </main>
+
+  <input type="file" id="media-input" accept="image/*,video/*" multiple hidden>
+  <input type="file" id="files-input" multiple hidden>
+  <input type="file" id="backup-input" accept=".pvault,application/octet-stream" hidden>
+
+  <!-- Full-screen viewer -->
+  <div id="viewer" class="viewer" hidden>
+    <header class="viewer-bar">
+      <button type="button" id="v-close" class="btn ghost">Close</button>
+      <div id="v-title" class="viewer-title"></div>
+      <div class="viewer-actions">
+        <button type="button" id="v-info" class="btn ghost icon" aria-label="Details">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>
+        </button>
+        <button type="button" id="v-save" class="btn ghost icon" aria-label="Save a copy outside the vault">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+        </button>
+        <button type="button" id="v-delete" class="btn ghost icon" aria-label="Delete">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+        </button>
+      </div>
+    </header>
+    <div id="v-stage" class="viewer-stage"></div>
+    <div id="v-details" class="viewer-details" hidden></div>
+    <button type="button" id="v-prev" class="nav prev" aria-label="Previous">&#8249;</button>
+    <button type="button" id="v-next" class="nav next" aria-label="Next">&#8250;</button>
+  </div>
+
+  <!-- Settings -->
+  <dialog id="settings" class="sheet">
+    <header class="sheet-head">
+      <h2>Settings</h2>
+      <button type="button" class="btn ghost" data-close>Done</button>
+    </header>
+    <div class="sheet-body">
+      <h3>Backup</h3>
+      <p id="backup-status" class="muted"></p>
+      <div class="row">
+        <button type="button" id="export-btn" class="btn primary">Export encrypted backup</button>
+        <button type="button" id="import-btn" class="btn">Import a backup</button>
+      </div>
+      <p class="hint">A backup is one encrypted file, locked with your current passphrase. Save it to Files, iCloud Drive, a USB drive or your PC. Importing merges its items into this vault, which is how you copy items between devices.</p>
+
+      <h3>Security</h3>
+      <div class="row">
+        <button type="button" id="change-pass-btn" class="btn">Change passphrase</button>
+      </div>
+      <label class="inline">Auto-lock after
+        <select id="autolock">
+          <option value="60000">1 minute</option>
+          <option value="300000">5 minutes</option>
+          <option value="900000">15 minutes</option>
+        </select>
+      </label>
+
+      <h3>Storage</h3>
+      <p id="storage-status" class="muted"></p>
+
+      <h3>Erase</h3>
+      <p class="hint">Permanently delete everything stored in this vault on this device. Backups you have exported are not affected.</p>
+      <button type="button" id="wipe-btn" class="btn danger">Erase vault</button>
+
+      <p class="hint about">Vault v1 &middot; Works offline &middot; Never connects to the internet with your data.</p>
+    </div>
+  </dialog>
+
+  <!-- Generic prompt / confirm -->
+  <dialog id="ask" class="modal">
+    <form method="dialog" id="ask-form">
+      <h2 id="ask-title"></h2>
+      <p id="ask-message" class="muted"></p>
+      <div id="ask-fields"></div>
+      <p id="ask-error" class="error" hidden></p>
+      <div class="row end">
+        <button type="button" value="cancel" id="ask-cancel" class="btn">Cancel</button>
+        <button type="submit" value="ok" id="ask-ok" class="btn primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="progress" class="progress" hidden>
+    <div class="progress-card" role="status" aria-live="polite">
+      <p id="progress-title"></p>
+      <div class="bar"><div id="progress-bar"></div></div>
+      <p id="progress-detail" class="muted"></p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <div id="shield" class="shield" aria-hidden="true"><img src="icons/icon-192.png" alt="" width="72" height="72"></div>
+</body>
+</html>
