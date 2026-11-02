@@ -6,6 +6,10 @@ import {
 import { buildBackup, importBackup, readBackupHeader } from './backup.js';
 import { makeThumb, renderPdf } from './media.js';
 
+// Must equal VERSION in sw.js and the app-version meta tag in index.html;
+// `python build-upload.py --bump` updates all three, and the build refuses if they differ.
+const APP_VERSION = 'vault-v6';
+
 const $ = (id) => document.getElementById(id);
 const MIN_PASS = 10;
 const HIDDEN_LOCK_MS = 30_000;   // lock if the app has been in the background this long
@@ -1042,14 +1046,12 @@ async function renderSettings() {
     persisted ? 'Storage is marked persistent.' : 'Storage is not marked persistent: on iPhone, add Vault to your Home Screen and open it from there.',
   ].filter(Boolean).join(' ');
 
-  $('version-status').textContent = `Installed version: ${await installedVersion()}.`;
-}
-
-// The version is the offline-cache name the service worker installed (e.g. "vault-v4" → "4").
-async function installedVersion() {
-  const keys = await caches?.keys().catch(() => []) || [];
-  const nums = keys.map((k) => Number(k.match(/^vault-v(\d+)$/)?.[1])).filter(Boolean);
-  return nums.length ? String(Math.max(...nums)) : 'not installed for offline use yet';
+  // The version of the code that is actually running. If the page itself came from a different
+  // version, an update didn't install cleanly; say so rather than hide it.
+  const pageVersion = document.querySelector('meta[name="app-version"]')?.content;
+  $('version-status').textContent = `Installed version: ${APP_VERSION.replace('vault-v', '')}.`
+    + (pageVersion === APP_VERSION ? ''
+      : ' Some files are from another version: open Vault again while online, or tap Check for updates.');
 }
 
 $('update-btn').addEventListener('click', async () => {
