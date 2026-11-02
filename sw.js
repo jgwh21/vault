@@ -1,6 +1,6 @@
 // Caches the app's own files so Vault opens with no internet connection.
 // Bump VERSION whenever any file changes so installed copies pick up the update.
-const VERSION = 'vault-v3';
+const VERSION = 'vault-v4';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/crypto.js', 'js/db.js', 'js/vault.js', 'js/backup.js', 'js/media.js',
@@ -9,7 +9,10 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache. Without it, a host that lets browsers keep
+  // files for a while (GitHub Pages: 10 minutes) can mix new and old files in one version.
+  const fresh = ASSETS.map((url) => new Request(url, { cache: 'reload' }));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(fresh)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

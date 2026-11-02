@@ -164,7 +164,17 @@ async function start() {
     document.body.textContent = 'Vault must be opened over HTTPS (or localhost) so encryption is available.';
     return;
   }
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // When a new version takes over, switch to it straight away if locked; if unlocked,
+    // don't interrupt (a reload would lock the vault), just say so.
+    const hadVersion = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadVersion) return; // first install, not an update
+      if (!state.key) location.reload();
+      else toast('Vault has been updated. Lock it and open it again to use the new version.', 8000);
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
   state.autoLockMs = Number(localStorage.getItem('autoLockMs')) || state.autoLockMs;
   state.keyInfo = await db.get('meta', 'keyInfo');
   if (state.keyInfo) {
@@ -948,7 +958,35 @@ async function renderSettings() {
     est?.quota ? `Space available to Vault: about ${fmtSize(Math.max(0, est.quota - est.usage))}.` : '',
     persisted ? 'Storage is marked persistent.' : 'Storage is not marked persistent: on iPhone, add Vault to your Home Screen and open it from there.',
   ].filter(Boolean).join(' ');
+
+  $('version-status').textContent = `Installed version: ${await installedVersion()}.`;
 }
+
+// The version is the offline-cache name the service worker installed (e.g. "vault-v4" → "4").
+async function installedVersion() {
+  const keys = await caches?.keys().catch(() => []) || [];
+  const nums = keys.map((k) => Number(k.match(/^vault-v(\d+)$/)?.[1])).filter(Boolean);
+  return nums.length ? String(Math.max(...nums)) : 'not installed for offline use yet';
+}
+
+$('update-btn').addEventListener('click', async () => {
+  const reg = await navigator.serviceWorker?.getRegistration().catch(() => null);
+  if (!reg) return toast('Updates need the app to be opened from its web address first.');
+  const btn = $('update-btn');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  try {
+    await reg.update();
+    toast(reg.installing || reg.waiting
+      ? 'Downloading the update. Lock Vault and open it again in a moment.'
+      : 'You have the latest version.', 6000);
+  } catch {
+    toast('Couldn\'t check for updates. Are you online?');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check for updates';
+  }
+});
 
 $('settings-btn').addEventListener('click', async () => {
   await renderSettings();
