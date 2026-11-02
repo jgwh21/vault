@@ -8,7 +8,7 @@ import { makeThumb, renderPdf } from './media.js';
 
 // Must equal VERSION in sw.js and the app-version meta tag in index.html;
 // `python build-upload.py --bump` updates all three, and the build refuses if they differ.
-const APP_VERSION = 'vault-v6';
+const APP_VERSION = 'vault-v7';
 
 const $ = (id) => document.getElementById(id);
 const MIN_PASS = 10;
@@ -161,6 +161,67 @@ for (const id of ['media-input', 'files-input', 'backup-input']) {
   $(id).addEventListener('change', () => { state.pickerOpen = false; });
 }
 
+// ---------- version & updates, shown on the lock and setup screens ----------
+// iOS freezes a Home Screen app as soon as it's closed, so an update only downloads while
+// Vault is open. Showing progress here tells you when it's safe to close.
+
+function setUpdateStatus(text, working = false) {
+  for (const el of document.querySelectorAll('.update-status')) {
+    el.textContent = text ? `· ${text}` : '';
+    el.classList.toggle('working', working);
+  }
+}
+
+function watchInstall(worker, firstInstall) {
+  const show = () => {
+    if (worker.state === 'installing') {
+      setUpdateStatus(firstInstall ? 'Saving for offline use, keep Vault open…' : 'Downloading update, keep Vault open…', true);
+    } else if (worker.state === 'redundant') {
+      setUpdateStatus('Update didn\'t finish, it will try again next time');
+    } else if (worker.state === 'activated') {
+      setUpdateStatus(firstInstall ? 'Ready to use offline' : 'Update installed, restarting…');
+    }
+  };
+  worker.addEventListener('statechange', show);
+  show();
+}
+
+async function startUpdates() {
+  for (const el of document.querySelectorAll('.app-version')) el.textContent = `Version ${APP_VERSION.replace('vault-v', '')}`;
+  if (!('serviceWorker' in navigator)) return;
+
+  // When a new version takes over, switch to it straight away if locked; if unlocked,
+  // don't interrupt (a reload would lock the vault), just say so.
+  const hadVersion = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadVersion) return; // first install, not an update
+    if (!state.key) location.reload();
+    else toast('Vault has been updated. Lock it and open it again to use the new version.', 8000);
+  });
+
+  // Listen on the existing registration before asking for a check, so a download that
+  // starts (or fails) in the meantime can't slip past and be reported as "Up to date".
+  let reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+  const firstInstall = !reg?.active;
+  if (!reg) {
+    try {
+      reg = await navigator.serviceWorker.register('sw.js');
+    } catch {
+      return;
+    }
+  }
+  reg.addEventListener('updatefound', () => watchInstall(reg.installing, firstInstall));
+  if (reg.installing) return watchInstall(reg.installing, firstInstall);
+
+  setUpdateStatus('Checking for updates…', true);
+  try {
+    await reg.update(); // starts a fresh check even if one at launch already failed
+  } catch {
+    return setUpdateStatus('Offline, couldn\'t check for updates');
+  }
+  if (!reg.installing && !reg.waiting) setUpdateStatus('Up to date');
+}
+
 // ---------- start-up, create, unlock, lock ----------
 
 async function start() {
@@ -168,17 +229,7 @@ async function start() {
     document.body.textContent = 'Vault must be opened over HTTPS (or localhost) so encryption is available.';
     return;
   }
-  if ('serviceWorker' in navigator) {
-    // When a new version takes over, switch to it straight away if locked; if unlocked,
-    // don't interrupt (a reload would lock the vault), just say so.
-    const hadVersion = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (!hadVersion) return; // first install, not an update
-      if (!state.key) location.reload();
-      else toast('Vault has been updated. Lock it and open it again to use the new version.', 8000);
-    });
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  startUpdates();
   state.autoLockMs = Number(localStorage.getItem('autoLockMs')) || state.autoLockMs;
   state.keyInfo = await db.get('meta', 'keyInfo');
   if (state.keyInfo) {
