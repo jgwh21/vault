@@ -39,7 +39,7 @@ export function kindOf(type) {
  * Encrypt and store one file. The file is read 4 MB at a time, so even large
  * videos never need to sit in memory all at once.
  */
-export async function addFile(key, file, { thumb, onProgress } = {}) {
+export async function addFile(key, file, { thumb, folder = null, onProgress } = {}) {
   const id = randomId();
   const type = typeOf(file);
   const chunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
@@ -60,6 +60,7 @@ export async function addFile(key, file, { thumb, onProgress } = {}) {
     added: Date.now(),
     modified: file.lastModified || Date.now(),
     hasThumb: !!thumb,
+    folder,
   };
 
   // The item record goes in last, so an interrupted import never leaves a
@@ -102,3 +103,20 @@ export async function readFile(key, item, onProgress) {
 }
 
 export const removeItem = (id) => db.deleteItem(id);
+
+/** Save changed metadata (e.g. a new folder) for an item returned by listItems. */
+export async function updateItem(key, item) {
+  const { id, ...meta } = item;
+  await db.putMany([{ store: 'items', value: { id, meta: await sealJSON(key, meta, aad.meta(id)) } }]);
+}
+
+// Folders are one encrypted list: [{ id, name, parent, created }], parent null = top level.
+// An item or folder whose parent no longer exists is treated as top level.
+export async function loadFolders(key) {
+  const blob = await db.get('meta', 'folders');
+  return blob ? openJSON(key, blob, aad.folders()) : [];
+}
+
+export async function saveFolders(key, folders) {
+  await db.set('meta', 'folders', await sealJSON(key, folders, aad.folders()));
+}

@@ -8,18 +8,21 @@
 //   "PVAULT01"                      8-byte magic
 //   u32 headerLength, header JSON   { format, v, created, items, keyInfo (base64 fields) }
 //   records, each:
-//     u8 type (1 item, 2 thumb, 3 chunk), u8 idLength, id (ASCII),
+//     u8 type (1 item, 2 thumb, 3 chunk, 4 folder list), u8 idLength, id (ASCII; empty for 4),
 //     [u32 chunkIndex  -- type 3 only], u32 payloadLength, payload
 //   u8 0                            end marker (a missing marker means the file is truncated)
 //
-// Per item, chunks come first, then the thumbnail, then the item record, so a restore that
-// is interrupted never leaves a visible item with missing pieces.
+// The folder list (version 2+) comes first. Per item, chunks come first, then the thumbnail,
+// then the item record, so a restore that is interrupted never leaves a visible item with
+// missing pieces.
 
-import { unlockKey, seal, open, aad, toB64, fromB64 } from './crypto.js';
+import { unlockKey, seal, open, openJSON, aad, toB64, fromB64 } from './crypto.js';
 import * as db from './db.js';
+import { loadFolders, saveFolders } from './vault.js';
 
 const MAGIC = 'PVAULT01';
-const T_END = 0, T_ITEM = 1, T_THUMB = 2, T_CHUNK = 3;
+const VERSION = 2; // v2 added the folder list; v1 backups still import
+const T_END = 0, T_ITEM = 1, T_THUMB = 2, T_CHUNK = 3, T_FOLDERS = 4;
 const te = new TextEncoder();
 const td = new TextDecoder();
 
@@ -48,10 +51,13 @@ export async function buildBackup(keyInfo, onProgress) {
   }
 
   const header = te.encode(JSON.stringify({
-    format: 'pvault', v: 1, created: new Date().toISOString(), items: items.length,
+    format: 'pvault', v: VERSION, created: new Date().toISOString(), items: items.length,
     keyInfo: encodeKeyInfo(keyInfo),
   }));
   const parts = [te.encode(MAGIC), u32(header.length), header];
+
+  const folders = await db.get('meta', 'folders');
+  if (folders) parts.push(...recordHead(T_FOLDERS, '', 0, folders.size), folders);
 
   let n = 0;
   for (const item of items) {
@@ -89,7 +95,9 @@ export async function readBackupHeader(file) {
   const r = new Reader(file);
   if (file.size < 13 || td.decode(await r.bytes(8)) !== MAGIC) throw new Error('That is not a Vault backup file.');
   const header = JSON.parse(td.decode(await r.bytes(await r.u32())));
-  if (header.format !== 'pvault' || header.v !== 1) throw new Error('Unsupported backup version.');
+  if (header.format !== 'pvault' || !(header.v >= 1 && header.v <= VERSION)) {
+    throw new Error('This backup was made by a newer version of Vault. Update the app and try again.');
+  }
   return { header, keyInfo: decodeKeyInfo(header.keyInfo), reader: r };
 }
 
@@ -121,10 +129,19 @@ export async function importBackup(file, { passphrase, currentKey, currentKeyInf
   for (;;) {
     const type = await r.u8();
     if (type === T_END) break;
-    if (type !== T_ITEM && type !== T_THUMB && type !== T_CHUNK) throw new Error('This backup file is damaged.');
+    if (type < T_ITEM || type > T_FOLDERS) throw new Error('This backup file is damaged.');
     const id = td.decode(await r.bytes(await r.u8()));
     const index = type === T_CHUNK ? await r.u32() : 0;
     let payload = r.blob(await r.u32());
+
+    if (type === T_FOLDERS) {
+      // Merge folder lists: add folders this vault doesn't have; existing ones keep their local name.
+      const incoming = await openJSON(backupKey, payload, aad.folders());
+      const folders = await loadFolders(key);
+      const have = new Set(folders.map((f) => f.id));
+      await saveFolders(key, [...folders, ...incoming.filter((f) => !have.has(f.id))]);
+      continue;
+    }
 
     if (existing.has(id)) {
       if (type === T_ITEM) skipped++;

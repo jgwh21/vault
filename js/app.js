@@ -1,6 +1,8 @@
-import { createKey, unlockKey, rewrapKey, WrongPassphrase } from './crypto.js';
+import { createKey, unlockKey, rewrapKey, randomId, WrongPassphrase } from './crypto.js';
 import * as db from './db.js';
-import { addFile, listItems, readFile, readThumb, removeItem, typeOf, kindOf, extOf } from './vault.js';
+import {
+  addFile, listItems, readFile, readThumb, removeItem, updateItem, loadFolders, saveFolders, typeOf, kindOf, extOf,
+} from './vault.js';
 import { buildBackup, importBackup, readBackupHeader } from './backup.js';
 import { makeThumb, renderPdf } from './media.js';
 
@@ -13,10 +15,13 @@ const state = {
   key: null,
   keyInfo: null,
   items: [],
+  folders: [],
+  cwd: null,          // id of the folder being shown; null = top level
   filter: 'all',
   query: '',
   selecting: false,
   selected: new Set(),
+  selectedFolders: new Set(),
   thumbUrls: new Map(),
   busy: false,        // long-running work in progress: don't auto-lock
   pickerOpen: false,  // system file picker showing: don't auto-lock
@@ -86,7 +91,8 @@ function ask({ title, message = '', fields = [], ok = 'OK', danger = false, vali
     const input = document.createElement('input');
     input.type = f.type || 'text';
     input.name = f.name;
-    input.autocomplete = f.type === 'password' ? 'off' : 'on';
+    input.autocomplete = 'off';
+    input.value = f.value || '';
     input.required = true;
     label.append(input);
     return label;
@@ -281,30 +287,230 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// ---------- folders ----------
+
+const folderById = (id) => (id ? state.folders.find((f) => f.id === id) : undefined);
+const parentOf = (x) => (folderById(x.parent) ? x.parent : null);
+const folderOf = (it) => (folderById(it.folder) ? it.folder : null);
+const subfolders = (parent) => state.folders
+  .filter((f) => parentOf(f) === parent)
+  .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+function folderPath(id) {
+  const path = [];
+  for (let f = folderById(id); f && path.length < 50; f = folderById(f.parent)) path.unshift(f);
+  return path;
+}
+const pathLabel = (id) => (id ? folderPath(id).map((f) => f.name).join(' / ') : 'Vault (top level)');
+
+function withDescendants(id) {
+  const out = new Set([id]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const f of state.folders) if (!out.has(f.id) && out.has(f.parent)) { out.add(f.id); grew = true; }
+  }
+  return out;
+}
+
+const countIn = (id) => subfolders(id).length + state.items.filter((it) => folderOf(it) === id).length;
+
+function folderNameError(name, parent, selfId) {
+  const n = name.trim();
+  if (!n) return 'Enter a name.';
+  if (n.length > 60) return 'Keep the name under 60 characters.';
+  if (subfolders(parent).some((f) => f.id !== selfId && f.name.toLowerCase() === n.toLowerCase())) {
+    return 'There is already a folder with that name here.';
+  }
+}
+
+function openFolder(id) {
+  state.cwd = id;
+  state.query = '';
+  $('search').value = '';
+  renderGrid();
+  scrollTo(0, 0);
+}
+
+/** Delete a folder record; anything inside it moves up to the folder's parent. */
+async function removeFolder(id) {
+  const f = folderById(id);
+  if (!f) return;
+  const parent = parentOf(f);
+  for (const sub of state.folders) if (sub.parent === id) sub.parent = parent;
+  for (const it of state.items) {
+    if (folderOf(it) === id) { it.folder = parent; await updateItem(state.key, it); }
+  }
+  state.folders = state.folders.filter((x) => x.id !== id);
+  await saveFolders(state.key, state.folders);
+}
+
+/** Ask where to move things. Resolves to a folder id, null for top level, or undefined if cancelled. */
+function chooseFolder(exclude) {
+  const dlg = $('move');
+  const list = $('move-list');
+  const option = (id, name, depth) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'move-opt';
+    b.style.paddingLeft = `${12 + depth * 20}px`;
+    b.dataset.id = id ?? '';
+    b.innerHTML = ICONS.folder;
+    b.append(name);
+    return b;
+  };
+  const rows = [option(null, 'Vault (top level)', 0)];
+  const walk = (parent, depth) => {
+    for (const f of subfolders(parent)) {
+      if (exclude.has(f.id)) continue;
+      rows.push(option(f.id, f.name, depth));
+      walk(f.id, depth + 1);
+    }
+  };
+  walk(null, 1);
+  list.replaceChildren(...rows);
+
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      list.onclick = null;
+      $('move-cancel').onclick = null;
+      dlg.oncancel = null;
+      dlg.close();
+      resolve(value);
+    };
+    list.onclick = (e) => {
+      const b = e.target.closest('.move-opt');
+      if (b) finish(b.dataset.id || null);
+    };
+    $('move-cancel').onclick = () => finish(undefined);
+    dlg.oncancel = (e) => { e.preventDefault(); finish(undefined); };
+    dlg.showModal();
+  });
+}
+
+$('new-folder-btn').addEventListener('click', async () => {
+  const parent = state.cwd;
+  const values = await ask({
+    title: 'New folder',
+    message: parent ? `Inside ${pathLabel(parent)}` : '',
+    fields: [{ name: 'name', label: 'Folder name' }],
+    ok: 'Create',
+    validate: (v) => folderNameError(v.name, parent),
+  });
+  if (!values) return;
+  state.folders.push({ id: randomId(), name: values.name.trim(), parent, created: Date.now() });
+  await saveFolders(state.key, state.folders);
+  renderGrid();
+});
+
+$('folder-rename').addEventListener('click', async () => {
+  const f = folderById(state.cwd);
+  if (!f) return;
+  const values = await ask({
+    title: 'Rename folder',
+    fields: [{ name: 'name', label: 'Folder name', value: f.name }],
+    ok: 'Rename',
+    validate: (v) => folderNameError(v.name, parentOf(f), f.id),
+  });
+  if (!values) return;
+  f.name = values.name.trim();
+  await saveFolders(state.key, state.folders);
+  renderGrid();
+});
+
+$('folder-delete').addEventListener('click', async () => {
+  const f = folderById(state.cwd);
+  if (!f) return;
+  const n = countIn(f.id);
+  if (!await confirmAsk({
+    title: `Delete folder "${f.name}"?`,
+    message: n
+      ? `Its ${n} item(s) won't be deleted. They move up to ${pathLabel(parentOf(f))}.`
+      : 'The folder is empty.',
+    ok: 'Delete folder',
+    danger: true,
+  })) return;
+  const parent = parentOf(f);
+  await busy(() => removeFolder(f.id));
+  state.cwd = parent;
+  await refresh();
+});
+
 // ---------- library grid ----------
 
 async function refresh() {
   state.items = await listItems(state.key);
+  state.folders = await loadFolders(state.key);
+  if (!folderById(state.cwd)) state.cwd = null;
   const live = new Set(state.items.map((i) => i.id));
   for (const [id, url] of state.thumbUrls) if (!live.has(id)) { URL.revokeObjectURL(url); state.thumbUrls.delete(id); }
   renderGrid();
   renderBanner();
 }
 
+// Searching looks through every folder; otherwise only the current folder is shown.
 function visibleItems() {
   const q = state.query.trim().toLowerCase();
   return state.items.filter((it) => {
     if (state.filter === 'image' && it.kind !== 'image') return false;
     if (state.filter === 'video' && it.kind !== 'video') return false;
     if (state.filter === 'docs' && (it.kind === 'image' || it.kind === 'video')) return false;
-    return !q || it.name.toLowerCase().includes(q);
+    return q ? it.name.toLowerCase().includes(q) : folderOf(it) === state.cwd;
   });
+}
+
+function visibleFolders() {
+  const q = state.query.trim().toLowerCase();
+  return q ? state.folders.filter((f) => f.name.toLowerCase().includes(q)) : subfolders(state.cwd);
 }
 
 const ICONS = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
   doc: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
 };
+
+function renderCrumbs() {
+  const inFolder = state.cwd !== null && !state.query.trim();
+  $('crumbs').hidden = !inFolder;
+  if (!inFolder) return;
+  const parts = [{ id: null, name: 'Vault' }, ...folderPath(state.cwd)];
+  $('crumb-list').replaceChildren(...parts.flatMap((p, i) => {
+    const last = i === parts.length - 1;
+    const el = document.createElement(last ? 'span' : 'button');
+    el.className = last ? 'crumb current' : 'crumb';
+    el.textContent = p.name;
+    if (!last) { el.type = 'button'; el.onclick = () => openFolder(p.id); }
+    if (!i) return [el];
+    const sep = document.createElement('span');
+    sep.className = 'crumb-sep';
+    sep.textContent = '›';
+    return [sep, el];
+  }));
+}
+
+function folderTile(f) {
+  const tile = document.createElement('button');
+  tile.type = 'button';
+  tile.className = 'tile folder';
+  tile.dataset.folder = f.id;
+  tile.setAttribute('aria-label', `Folder ${f.name}`);
+  if (state.selectedFolders.has(f.id)) tile.classList.add('selected');
+  const art = document.createElement('div');
+  art.className = 'tile-art';
+  art.innerHTML = ICONS.folder;
+  const count = document.createElement('span');
+  count.className = 'tile-ext';
+  const n = countIn(f.id);
+  count.textContent = `${n} item${n === 1 ? '' : 's'}`;
+  art.append(count);
+  const name = document.createElement('span');
+  name.className = 'tile-name';
+  name.textContent = f.name;
+  const check = document.createElement('span');
+  check.className = 'check';
+  tile.append(art, name, check);
+  return tile;
+}
 
 const thumbObserver = new IntersectionObserver((entries) => {
   for (const { target, isIntersecting } of entries) {
@@ -331,11 +537,12 @@ async function loadThumb(tile) {
 
 function renderGrid() {
   const grid = $('grid');
+  const folders = visibleFolders();
   const items = visibleItems();
-  $('empty').hidden = state.items.length > 0;
   thumbObserver.disconnect();
+  renderCrumbs();
 
-  grid.replaceChildren(...items.map((it) => {
+  grid.replaceChildren(...folders.map(folderTile), ...items.map((it) => {
     const tile = document.createElement('button');
     tile.type = 'button';
     tile.className = `tile kind-${it.kind}`;
@@ -374,12 +581,14 @@ function renderGrid() {
     return tile;
   }));
 
-  if (state.items.length && !items.length) {
-    const p = document.createElement('p');
-    p.className = 'muted no-results';
-    p.textContent = 'Nothing matches.';
-    grid.append(p);
-  }
+  const nothing = !folders.length && !items.length;
+  const filtered = state.query.trim() || state.filter !== 'all';
+  $('empty').hidden = !nothing;
+  $('empty-title').textContent = filtered ? 'Nothing matches.'
+    : state.cwd ? 'This folder is empty.' : 'Your vault is empty.';
+  $('empty-text').textContent = filtered ? ''
+    : state.cwd ? 'Add photos or files here, or move items in with Select → Move.'
+      : 'Add photos and videos from your library, or documents from Files. Use the folder button to organise them.';
 }
 
 function renderBanner() {
@@ -392,6 +601,13 @@ function renderBanner() {
 $('grid').addEventListener('click', (e) => {
   const tile = e.target.closest('.tile');
   if (!tile) return;
+  if (tile.dataset.folder) {
+    const fid = tile.dataset.folder;
+    if (!state.selecting) return openFolder(fid);
+    state.selectedFolders.has(fid) ? state.selectedFolders.delete(fid) : state.selectedFolders.add(fid);
+    tile.classList.toggle('selected');
+    return updateSelectBar();
+  }
   const id = tile.dataset.id;
   if (state.selecting) {
     state.selected.has(id) ? state.selected.delete(id) : state.selected.add(id);
@@ -415,6 +631,7 @@ $('search').addEventListener('input', (e) => { state.query = e.target.value; ren
 function setSelecting(on) {
   state.selecting = on;
   state.selected.clear();
+  state.selectedFolders.clear();
   document.body.classList.toggle('selecting', on);
   $('select-btn').textContent = on ? 'Cancel' : 'Select';
   $('addbar').hidden = on;
@@ -423,17 +640,49 @@ function setSelecting(on) {
   updateSelectBar();
 }
 function updateSelectBar() {
-  $('sel-count').textContent = `${state.selected.size} selected`;
-  $('sel-delete').disabled = state.selected.size === 0;
+  const n = state.selected.size + state.selectedFolders.size;
+  $('sel-count').textContent = `${n} selected`;
+  $('sel-delete').disabled = n === 0;
+  $('sel-move').disabled = n === 0;
 }
 $('select-btn').addEventListener('click', () => setSelecting(!state.selecting));
 $('sel-done').addEventListener('click', () => setSelecting(false));
+
+$('sel-move').addEventListener('click', async () => {
+  const exclude = new Set();
+  for (const id of state.selectedFolders) for (const d of withDescendants(id)) exclude.add(d);
+  const target = await chooseFolder(exclude); // a folder can't go inside itself
+  if (target === undefined) return;
+  await busy(async () => {
+    const n = state.selected.size;
+    let i = 0;
+    for (const id of state.selected) {
+      progress('Moving…', ++i / n);
+      const it = state.items.find((x) => x.id === id);
+      if (it && folderOf(it) !== target) { it.folder = target; await updateItem(state.key, it); }
+    }
+    for (const id of state.selectedFolders) { const f = folderById(id); if (f) f.parent = target; }
+    if (state.selectedFolders.size) await saveFolders(state.key, state.folders);
+  });
+  setSelecting(false);
+  await refresh();
+  toast(`Moved to ${pathLabel(target)}.`);
+});
+
 $('sel-delete').addEventListener('click', async () => {
-  const n = state.selected.size;
-  if (!await confirmAsk({ title: `Delete ${n} item${n === 1 ? '' : 's'}?`, message: 'They will be removed from this vault permanently. Exported backups are not affected.', ok: 'Delete', danger: true })) return;
+  const ni = state.selected.size;
+  const nf = state.selectedFolders.size;
+  const what = [ni && `${ni} item${ni === 1 ? '' : 's'}`, nf && `${nf} folder${nf === 1 ? '' : 's'}`].filter(Boolean).join(' and ');
+  const message = [
+    ni && 'Items are removed from this vault permanently. Exported backups are not affected.',
+    nf && 'Deleting a folder doesn\'t delete what\'s inside it; its contents move up one level.',
+  ].filter(Boolean).join('\n\n');
+  if (!await confirmAsk({ title: `Delete ${what}?`, message, ok: 'Delete', danger: true })) return;
   await busy(async () => {
     let i = 0;
-    for (const id of state.selected) { progress('Deleting…', ++i / n); await removeItem(id); }
+    for (const id of state.selected) { progress('Deleting…', ++i / ni); await removeItem(id); }
+    state.items = await listItems(state.key);
+    for (const id of state.selectedFolders) await removeFolder(id);
   });
   setSelecting(false);
   await refresh();
@@ -467,6 +716,7 @@ async function addFiles(files) {
         const thumb = await makeThumb(file, kindOf(typeOf(file)));
         await addFile(state.key, file, {
           thumb,
+          folder: state.cwd,
           onProgress: (bytes) => progress(label, (done + bytes) / (total || 1), file.name),
         });
       } catch (err) {
@@ -609,7 +859,7 @@ async function showCurrent() {
 }
 
 function renderDetails(it) {
-  const rows = [['Name', it.name], ['Type', it.type], ['Size', fmtSize(it.size)], ['Added', fmtDate(it.added)], ['File date', fmtDate(it.modified)]];
+  const rows = [['Name', it.name], ['Folder', pathLabel(folderOf(it))], ['Type', it.type], ['Size', fmtSize(it.size)], ['Added', fmtDate(it.added)], ['File date', fmtDate(it.modified)]];
   const dl = document.createElement('dl');
   for (const [k, v] of rows) {
     const dt = document.createElement('dt'); dt.textContent = k;
@@ -660,17 +910,26 @@ addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') step(1);
 });
 
-// Swipe left/right between items (not on PDFs/text, which scroll)
+// Swipe left/right between items of every kind. A mostly-horizontal swipe changes item;
+// vertical scrolling (PDFs, text) is unaffected. Swipes that start on a player's control
+// bar are left alone so dragging the video/audio position slider doesn't change item.
+const PLAYER_CONTROLS_HEIGHT = 70;
 let touchStart = null;
 $('v-stage').addEventListener('touchstart', (e) => {
-  touchStart = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+  touchStart = null;
+  if (e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const media = e.target.closest('video, audio');
+  if (media && (media.tagName === 'AUDIO' || t.clientY > media.getBoundingClientRect().bottom - PLAYER_CONTROLS_HEIGHT)) return;
+  touchStart = { x: t.clientX, y: t.clientY };
 }, { passive: true });
 $('v-stage').addEventListener('touchend', (e) => {
-  if (!touchStart || !$('v-stage').querySelector('img.media')) return;
+  if (!touchStart) return;
   const dx = e.changedTouches[0].clientX - touchStart.x;
   const dy = e.changedTouches[0].clientY - touchStart.y;
-  if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
   touchStart = null;
+  if ((window.visualViewport?.scale || 1) > 1.05) return; // pinch-zoomed in: the swipe is panning
+  if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
 });
 
 // ---------- settings ----------

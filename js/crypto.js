@@ -104,6 +104,7 @@ export const aad = {
   meta: (id) => `meta:${id}`,
   thumb: (id) => `thumb:${id}`,
   chunk: (id, i) => `chunk:${id}:${i}`,
+  folders: () => 'folders',
 };
 
 export function toB64(bytes) {
