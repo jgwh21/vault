@@ -63,6 +63,9 @@
         <h1>Vault</h1>
         <div class="topbar-actions">
           <button type="button" id="select-btn" class="btn ghost">Select</button>
+          <button type="button" id="new-folder-btn" class="btn ghost icon" aria-label="New folder">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10.5v5M9.5 13h5"/></svg>
+          </button>
           <button type="button" id="settings-btn" class="btn ghost icon" aria-label="Settings">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
           </button>
@@ -77,6 +80,12 @@
         <button type="button" id="backup-banner-btn" class="btn small primary">Back up</button>
       </div>
 
+      <nav id="crumbs" class="crumbs" aria-label="Folder" hidden>
+        <div id="crumb-list" class="crumb-list"></div>
+        <button type="button" id="folder-rename" class="btn ghost small">Rename</button>
+        <button type="button" id="folder-delete" class="btn ghost small">Delete folder</button>
+      </nav>
+
       <div class="toolbar">
         <div class="chips" role="tablist" aria-label="Filter">
           <button type="button" class="chip" data-filter="all" aria-selected="true">All</button>
@@ -89,8 +98,8 @@
 
       <div id="grid" class="grid"></div>
       <div id="empty" class="empty" hidden>
-        <p><strong>Your vault is empty.</strong></p>
-        <p class="muted">Add photos and videos from your library, or documents from Files.</p>
+        <p><strong id="empty-title"></strong></p>
+        <p id="empty-text" class="muted"></p>
       </div>
 
       <div id="addbar" class="bottombar">
@@ -99,6 +108,7 @@
       </div>
       <div id="selectbar" class="bottombar" hidden>
         <span id="sel-count">0 selected</span>
+        <button type="button" id="sel-move" class="btn primary" disabled>Move</button>
         <button type="button" id="sel-delete" class="btn danger" disabled>Delete</button>
         <button type="button" id="sel-done" class="btn">Done</button>
       </div>
@@ -182,6 +192,17 @@
         <button type="submit" value="ok" id="ask-ok" class="btn primary">OK</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Folder picker for Move -->
+  <dialog id="move" class="modal">
+    <div class="move-body">
+      <h2>Move to…</h2>
+      <div id="move-list" class="move-list"></div>
+      <div class="row end">
+        <button type="button" id="move-cancel" class="btn">Cancel</button>
+      </div>
+    </div>
   </dialog>
 
   <div id="progress" class="progress" hidden>

@@ -1,6 +1,6 @@
 // Caches the app's own files so Vault opens with no internet connection.
 // Bump VERSION whenever any file changes so installed copies pick up the update.
-const VERSION = 'vault-v1';
+const VERSION = 'vault-v3';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/crypto.js', 'js/db.js', 'js/vault.js', 'js/backup.js', 'js/media.js',
