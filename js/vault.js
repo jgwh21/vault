@@ -110,6 +110,16 @@ export async function updateItem(key, item) {
   await db.putMany([{ store: 'items', value: { id, meta: await sealJSON(key, meta, aad.meta(id)) } }]);
 }
 
+/** Add a thumbnail to an existing item (e.g. a video whose preview couldn't be made on import). */
+export async function setThumb(key, item, thumb) {
+  item.hasThumb = true;
+  const { id, ...meta } = item;
+  await db.putMany([
+    { store: 'thumbs', key: id, value: await seal(key, await thumb.arrayBuffer(), aad.thumb(id)) },
+    { store: 'items', value: { id, meta: await sealJSON(key, meta, aad.meta(id)) } },
+  ]);
+}
+
 // Folders are one encrypted list: [{ id, name, parent, created }], parent null = top level.
 // An item or folder whose parent no longer exists is treated as top level.
 export async function loadFolders(key) {

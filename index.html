@@ -7,7 +7,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <title>Vault</title>
-  <meta name="app-version" content="vault-v7">
+  <meta name="app-version" content="vault-v8">
   <meta name="description" content="Private, encrypted storage for your photos, videos and documents.">
   <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
@@ -96,7 +96,19 @@
           <button type="button" class="chip" data-filter="video">Videos</button>
           <button type="button" class="chip" data-filter="docs">Documents</button>
         </div>
-        <input type="search" id="search" placeholder="Search by name" aria-label="Search by name">
+        <div class="search-row">
+          <input type="search" id="search" placeholder="Search by name" aria-label="Search by name">
+          <select id="sort" aria-label="Sort by">
+            <option value="added-desc">Newest added</option>
+            <option value="added-asc">Oldest added</option>
+            <option value="date-desc">File date, newest</option>
+            <option value="date-asc">File date, oldest</option>
+            <option value="name-asc">Name A–Z</option>
+            <option value="name-desc">Name Z–A</option>
+            <option value="size-desc">Largest first</option>
+            <option value="size-asc">Smallest first</option>
+          </select>
+        </div>
       </div>
 
       <div id="grid" class="grid"></div>

@@ -260,3 +260,9 @@ body.shielded dialog, body.shielded .viewer { visibility: hidden; }
   border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .update-status.working::after { animation: none; } }
+
+/* Search and sort share a row */
+.search-row { display: flex; gap: 8px; min-width: 0; }
+.search-row #search { flex: 1; min-width: 0; }
+.search-row select { flex: none; width: auto; max-width: 48%; margin: 0; }
+@media (min-width: 700px) { .toolbar { grid-template-columns: 1fr 440px; } }

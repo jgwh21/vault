@@ -1,14 +1,14 @@
 import { createKey, unlockKey, rewrapKey, randomId, WrongPassphrase } from './crypto.js';
 import * as db from './db.js';
 import {
-  addFile, listItems, readFile, readThumb, removeItem, updateItem, loadFolders, saveFolders, typeOf, kindOf, extOf,
+  addFile, listItems, readFile, readThumb, removeItem, updateItem, setThumb, loadFolders, saveFolders, typeOf, kindOf, extOf,
 } from './vault.js';
 import { buildBackup, importBackup, readBackupHeader } from './backup.js';
-import { makeThumb, renderPdf } from './media.js';
+import { makeThumb, renderPdf, videoFrameThumb } from './media.js';
 
 // Must equal VERSION in sw.js and the app-version meta tag in index.html;
 // `python build-upload.py --bump` updates all three, and the build refuses if they differ.
-const APP_VERSION = 'vault-v7';
+const APP_VERSION = 'vault-v8';
 
 const $ = (id) => document.getElementById(id);
 const MIN_PASS = 10;
@@ -23,6 +23,7 @@ const state = {
   cwd: null,          // id of the folder being shown; null = top level
   filter: 'all',
   query: '',
+  sort: 'added-desc',
   selecting: false,
   selected: new Set(),
   selectedFolders: new Set(),
@@ -231,6 +232,8 @@ async function start() {
   }
   startUpdates();
   state.autoLockMs = Number(localStorage.getItem('autoLockMs')) || state.autoLockMs;
+  try { if (SORTS[localStorage.getItem('sort')]) state.sort = localStorage.getItem('sort'); } catch {}
+  $('sort').value = state.sort;
   state.keyInfo = await db.get('meta', 'keyInfo');
   if (state.keyInfo) {
     show('screen-lock');
@@ -520,13 +523,28 @@ function visibleItems() {
     if (state.filter === 'video' && it.kind !== 'video') return false;
     if (state.filter === 'docs' && (it.kind === 'image' || it.kind === 'video')) return false;
     return q ? it.name.toLowerCase().includes(q) : folderOf(it) === state.cwd;
-  });
+  }).sort(SORTS[state.sort] || SORTS['added-desc']);
 }
 
+// Folders always come first, by name (reversed for Name Z–A); items follow the chosen sort.
 function visibleFolders() {
   const q = state.query.trim().toLowerCase();
-  return q ? state.folders.filter((f) => f.name.toLowerCase().includes(q)) : subfolders(state.cwd);
+  const folders = q ? state.folders.filter((f) => f.name.toLowerCase().includes(q)) : subfolders(state.cwd);
+  const byName = folders.sort((a, b) => byText(a.name, b.name));
+  return state.sort === 'name-desc' ? byName.reverse() : byName;
 }
+
+const byText = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+const SORTS = {
+  'added-desc': (a, b) => b.added - a.added,
+  'added-asc': (a, b) => a.added - b.added,
+  'date-desc': (a, b) => b.modified - a.modified || b.added - a.added,
+  'date-asc': (a, b) => a.modified - b.modified || a.added - b.added,
+  'name-asc': (a, b) => byText(a.name, b.name),
+  'name-desc': (a, b) => byText(b.name, a.name),
+  'size-desc': (a, b) => b.size - a.size,
+  'size-asc': (a, b) => a.size - b.size,
+};
 
 const ICONS = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
@@ -682,6 +700,11 @@ for (const chip of document.querySelectorAll('.chip')) {
   });
 }
 $('search').addEventListener('input', (e) => { state.query = e.target.value; renderGrid(); });
+$('sort').addEventListener('change', (e) => {
+  state.sort = e.target.value;
+  try { localStorage.setItem('sort', state.sort); } catch {}
+  renderGrid();
+});
 
 // Selection mode
 function setSelecting(on) {
@@ -979,6 +1002,7 @@ async function showCurrent() {
     media.onerror = () => stage.replaceChildren(unsupported());
     stage.replaceChildren(media);
     viewer.cleanup = () => { media.pause(); media.removeAttribute('src'); media.load(); };
+    if (it.kind === 'video' && !it.hasThumb) saveThumbWhenShown(media, it);
   } else if (it.kind === 'pdf') {
     const pages = document.createElement('div');
     pages.className = 'pdf';
@@ -1004,6 +1028,25 @@ async function showCurrent() {
     btn.onclick = saveCopy;
     stage.replaceChildren(message(`${extOf(it.name).toUpperCase() || 'This'} files can't be previewed inside Vault.`, btn));
   }
+}
+
+// A video whose preview couldn't be made on import gets one from the viewer: once a real frame
+// is on screen (when it loads, or after a moment of playing), it is saved as the thumbnail.
+function saveThumbWhenShown(video, it) {
+  let done = false;
+  const tryFrame = async () => {
+    if (done || !state.key || !video.videoWidth) return;
+    const thumb = await videoFrameThumb(video);
+    if (!thumb || done) return;
+    done = true;
+    video.removeEventListener('loadeddata', tryFrame);
+    video.removeEventListener('timeupdate', onTime);
+    await setThumb(state.key, it, thumb).catch(() => {});
+    renderGrid();
+  };
+  const onTime = () => { if (video.currentTime > 0.5) tryFrame(); };
+  video.addEventListener('loadeddata', tryFrame);
+  video.addEventListener('timeupdate', onTime);
 }
 
 function renderDetails(it) {
