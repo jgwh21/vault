@@ -1,7 +1,7 @@
 // Caches the app's own files so Vault opens with no internet connection.
 // Bump VERSION whenever any file changes so installed copies pick up the update
 // (run `python build-upload.py --bump`, which also updates the stamps below).
-const VERSION = 'vault-v8';
+const VERSION = 'vault-v9';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'js/app.js', 'js/crypto.js', 'js/db.js', 'js/vault.js', 'js/backup.js', 'js/media.js',

@@ -8,7 +8,7 @@ import { makeThumb, renderPdf, videoFrameThumb } from './media.js';
 
 // Must equal VERSION in sw.js and the app-version meta tag in index.html;
 // `python build-upload.py --bump` updates all three, and the build refuses if they differ.
-const APP_VERSION = 'vault-v8';
+const APP_VERSION = 'vault-v9';
 
 const $ = (id) => document.getElementById(id);
 const MIN_PASS = 10;
@@ -131,26 +131,52 @@ function ask({ title, message = '', fields = [], ok = 'OK', danger = false, vali
 
 const confirmAsk = (opts) => ask(opts).then((v) => v !== null);
 
-/** Hand a file to the user: share sheet on phones/tablets (Save to Files etc.), download elsewhere. */
-async function deliver(blob, filename) {
-  const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
-  if (isTouch && navigator.canShare?.({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file] });
-      return true;
-    } catch (e) {
-      if (e.name === 'AbortError') return false;
+/**
+ * Hand a file to the user: the Share sheet on phones and tablets (Save to Files etc.), a download
+ * elsewhere. iOS only opens the Share sheet during a tap, so call this synchronously from the tap's
+ * click handler (see askThenRun): the share starts before anything is awaited. Home Screen apps on
+ * iPhone can't download files, so there is no download fallback on touch devices; a failure is
+ * reported instead. Resolves to 'saved' or 'cancelled'; rejects with the reason it failed.
+ */
+function deliverNow(file) {
+  if (isTouch) {
+    if (!navigator.canShare?.({ files: [file] })) {
+      const err = new Error('This device won\'t share this kind of file from Vault.');
+      err.name = 'NotSupportedError';
+      return Promise.reject(err);
     }
+    state.pickerOpen = true; // choosing a place in Files can take a while: don't auto-lock meanwhile
+    return navigator.share({ files: [file] })
+      .then(() => 'saved', (e) => { if (e.name === 'AbortError') return 'cancelled'; throw e; })
+      .finally(() => { state.pickerOpen = false; });
   }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(file);
-  a.download = filename;
+  a.download = file.name;
   document.body.append(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
-  return true;
+  return Promise.resolve('saved');
 }
+
+/**
+ * Like confirmAsk, but `action` runs inside the tap on the OK button itself (needed for
+ * deliverNow). Resolves to { result } holding the action's promise (wrapped, so an async
+ * return doesn't wait on it), or null if the dialog was cancelled.
+ */
+async function askThenRun(opts, action) {
+  let started = null;
+  const onTap = () => { started = action(); started.catch(() => {}); };
+  $('ask-ok').addEventListener('click', onTap); // runs before the form submits and closes the dialog
+  try {
+    return await confirmAsk(opts) && started ? { result: started } : null;
+  } finally {
+    $('ask-ok').removeEventListener('click', onTap);
+  }
+}
+
+const errorText = (err) => `${err?.name || 'Error'}: ${err?.message || err}`;
 
 function pickFile(input) {
   state.pickerOpen = true;
@@ -1063,12 +1089,17 @@ function renderDetails(it) {
 async function saveCopy() {
   const it = viewer.list[viewer.index];
   if (!viewer.blob || !it) return;
-  if (!await confirmAsk({
+  const file = new File([viewer.blob], it.name, { type: viewer.blob.type || 'application/octet-stream' });
+  const run = await askThenRun({
     title: 'Save an unencrypted copy?',
     message: 'The copy will be outside the vault and readable by anyone with access to where you save it.',
     ok: 'Continue',
-  })) return;
-  await deliver(viewer.blob, it.name);
+  }, () => deliverNow(file));
+  try {
+    if (run && await run.result === 'saved') toast('Copy saved.');
+  } catch (err) {
+    await ask({ title: 'Copy not saved', message: errorText(err), ok: 'OK' });
+  }
 }
 
 const step = (d) => {
@@ -1186,19 +1217,35 @@ $('autolock').addEventListener('change', (e) => {
 
 $('export-btn').addEventListener('click', async () => {
   if (!state.items.length) return toast('Nothing to back up yet.');
-  const { blob, count } = await busy(() => buildBackup(state.keyInfo, (f) => progress('Preparing backup…', f)));
-  const name = `vault-backup-${new Date().toISOString().slice(0, 10)}.pvault`;
-  // Sharing must start from a fresh tap on iOS, so ask once the file is ready.
-  if (!await confirmAsk({
-    title: 'Backup ready',
-    message: `${count} item(s), ${fmtSize(blob.size)}. ${isTouch ? 'Choose "Save to Files" (or another place) in the next screen.' : 'It will be saved to your downloads.'}`,
-    ok: 'Save backup',
-  })) return;
-  if (await deliver(blob, name)) {
+  let backup;
+  try {
+    backup = await busy(() => buildBackup(state.keyInfo, (f) => progress('Preparing backup…', f)));
+  } catch (err) {
+    return ask({ title: 'Couldn\'t prepare the backup', message: errorText(err), ok: 'OK' });
+  }
+  const file = new File([backup.blob], `vault-backup-${new Date().toISOString().slice(0, 10)}.pvault`,
+    { type: 'application/octet-stream' });
+  // Sharing must start from a fresh tap on iOS, so ask once the file is ready, and retry on a new tap.
+  let title = 'Backup ready';
+  let message = `${backup.count} item(s), ${fmtSize(file.size)}. `
+    + (isTouch ? 'Choose "Save to Files" (or another place) in the next screen.' : 'It will be saved to your downloads.');
+  let ok = 'Save backup';
+  for (;;) {
+    const run = await askThenRun({ title, message, ok }, () => deliverNow(file));
+    if (!run) return;
+    try {
+      if (await run.result === 'cancelled') return;
+    } catch (err) {
+      title = 'Backup not saved';
+      message = `${errorText(err)}\n\nYour vault is fine. Tap Try again; if it keeps failing, note this message.`;
+      ok = 'Try again';
+      continue;
+    }
     state.lastBackup = Date.now();
     await db.set('meta', 'lastBackup', state.lastBackup);
     renderBanner();
     renderSettings();
+    return toast('Backup saved.');
   }
 });
 
