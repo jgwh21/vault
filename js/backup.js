@@ -15,8 +15,14 @@
 // The folder list (version 2+) comes first. Per item, chunks come first, then the thumbnail,
 // then the item record, so a restore that is interrupted never leaves a visible item with
 // missing pieces.
+//
+// Large backups are split into parts of about PART_BYTES. Each part is a complete file in the
+// format above (header with part/parts/set added), holding the next run of records; a big video
+// may continue into the next part, its item record coming in the part with its last chunk.
+// Parts are built one at a time because iPhones give a web app too little memory to hold a whole
+// vault: holding a 3 GB backup in one go crashes the page.
 
-import { unlockKey, seal, open, openJSON, aad, toB64, fromB64 } from './crypto.js';
+import { CHUNK_SIZE, unlockKey, seal, open, openJSON, aad, toB64, fromB64, randomId } from './crypto.js';
 import * as db from './db.js';
 import { loadFolders, saveFolders } from './vault.js';
 
@@ -40,40 +46,55 @@ function recordHead(type, id, index, length) {
 const encodeKeyInfo = (k) => ({ ...k, salt: toB64(k.salt), iv: toB64(k.iv), wrapped: toB64(k.wrapped) });
 const decodeKeyInfo = (k) => ({ ...k, salt: fromB64(k.salt), iv: fromB64(k.iv), wrapped: fromB64(k.wrapped) });
 
-/** Assemble the backup as a Blob. Blob parts reference stored data rather than copying it. */
-export async function buildBackup(keyInfo, onProgress) {
-  const items = await db.getAll('items');
-  const thumbIds = new Set(await db.getAllKeys('thumbs'));
-  const chunksById = new Map();
-  for (const [id, i] of await db.getAllKeys('chunks')) {
-    if (!chunksById.has(id)) chunksById.set(id, []);
-    chunksById.get(id).push(i);
-  }
+export const PART_BYTES = 200 * 1024 * 1024;
+const SEAL_OVERHEAD = 28; // 12-byte IV + 16-byte GCM tag per encrypted record
 
+/**
+ * Decide which records go in which part, from the decrypted item list (sizes are known there),
+ * without reading any stored data. Returns { parts: [[record, …], …], bytes: [estimate, …] }.
+ */
+export function planBackup(items, partBytes = PART_BYTES) {
+  const parts = [[]];
+  const bytes = [0];
+  const add = (record, size) => {
+    if (bytes.at(-1) + size > partBytes && parts.at(-1).length) { parts.push([]); bytes.push(0); }
+    parts.at(-1).push(record);
+    bytes[bytes.length - 1] += size;
+  };
+  for (const it of items) {
+    for (let i = 0; i < it.chunks; i++) {
+      add({ type: T_CHUNK, id: it.id, index: i }, Math.max(0, Math.min(CHUNK_SIZE, it.size - i * CHUNK_SIZE)) + SEAL_OVERHEAD);
+    }
+    if (it.hasThumb) add({ type: T_THUMB, id: it.id }, 40_000);
+    add({ type: T_ITEM, id: it.id }, 1_000);
+  }
+  return { parts, bytes, set: randomId() };
+}
+
+/** Assemble part k of a plan as a Blob, reading only that part's records. */
+export async function buildPart(keyInfo, plan, k, onProgress) {
+  const records = plan.parts[k];
   const header = te.encode(JSON.stringify({
-    format: 'pvault', v: VERSION, created: new Date().toISOString(), items: items.length,
+    format: 'pvault', v: VERSION, created: new Date().toISOString(),
+    items: records.filter((r) => r.type === T_ITEM).length,
+    part: k + 1, parts: plan.parts.length, set: plan.set,
     keyInfo: encodeKeyInfo(keyInfo),
   }));
-  const parts = [te.encode(MAGIC), u32(header.length), header];
+  const out = [te.encode(MAGIC), u32(header.length), header];
 
-  const folders = await db.get('meta', 'folders');
-  if (folders) parts.push(...recordHead(T_FOLDERS, '', 0, folders.size), folders);
+  const folders = await db.get('meta', 'folders'); // in every part, so any part restores its folders
+  if (folders) out.push(...recordHead(T_FOLDERS, '', 0, folders.size), folders);
 
-  let n = 0;
-  for (const item of items) {
-    for (const i of chunksById.get(item.id) || []) {
-      const blob = await db.get('chunks', [item.id, i]);
-      parts.push(...recordHead(T_CHUNK, item.id, i, blob.size), blob);
-    }
-    if (thumbIds.has(item.id)) {
-      const blob = await db.get('thumbs', item.id);
-      parts.push(...recordHead(T_THUMB, item.id, 0, blob.size), blob);
-    }
-    parts.push(...recordHead(T_ITEM, item.id, 0, item.meta.size), item.meta);
-    onProgress?.(++n / items.length);
+  for (const [n, rec] of records.entries()) {
+    const blob = rec.type === T_CHUNK ? await db.get('chunks', [rec.id, rec.index])
+      : rec.type === T_THUMB ? await db.get('thumbs', rec.id)
+        : (await db.get('items', rec.id))?.meta;
+    if (!blob) throw new Error(`Part of an item is missing from storage (${rec.id.slice(0, 8)}).`);
+    out.push(...recordHead(rec.type, rec.id, rec.index || 0, blob.size), blob);
+    onProgress?.((n + 1) / records.length);
   }
-  parts.push(Uint8Array.of(T_END));
-  return { blob: new Blob(parts, { type: 'application/octet-stream' }), count: items.length };
+  out.push(Uint8Array.of(T_END));
+  return new Blob(out, { type: 'application/octet-stream' });
 }
 
 class Reader {

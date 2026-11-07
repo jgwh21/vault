@@ -19,8 +19,11 @@ server-side storage and no expiry.
   Starting on a selected tile deselects instead. On the PC, drag with the mouse.
 - **View inside the app**: photos, video and audio playback, PDFs (all pages), and text files.
   Other formats (Word, Excel, Pages…) can be opened in another app via "Save a copy".
-- **Encrypted backup export**: one `.pvault` file you can save anywhere. Importing a backup
-  merges it into a vault, which is also how you copy items between iPhone, iPad and PC.
+- **Encrypted backup export**: `.pvault` files you can save anywhere. Large vaults are saved in
+  parts of about 200 MB (an iPhone can't hold a whole multi-GB vault in memory); select all the
+  parts together when importing. After a first full backup you can back up just the new items.
+  Importing a backup merges it into a vault, which is also how you copy items between iPhone,
+  iPad and PC.
 - Auto-lock after inactivity, lock when the app is in the background for 30 seconds, and
   content hidden from the iOS app-switcher preview.
 - Works fully offline. A Content Security Policy blocks the app from connecting anywhere
@@ -86,7 +89,8 @@ or *Menu → Apps → Install*).
 - Importing copies the file; the original stays in Photos/Files. Delete it there yourself if
   you want it only in the vault.
 - **Back up regularly** (Settings → Export encrypted backup → Save to Files / iCloud Drive /
-  USB / PC). The app shows a reminder when items aren't in a backup yet.
+  USB / PC). Keep all parts of a backup in one folder. The app shows a reminder when items
+  aren't in a backup yet. A "new items only" backup needs the earlier full backup to restore everything.
   - Deleting the Vault icon from your Home Screen **deletes everything in it**. So does
     *Settings → Safari → Clear History and Website Data*. Your backups are your safety net.
 - To move items between devices: export a backup on one, then **Import a backup** on the other.

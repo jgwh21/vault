@@ -7,7 +7,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="referrer" content="no-referrer">
   <title>Vault</title>
-  <meta name="app-version" content="vault-v9">
+  <meta name="app-version" content="vault-v10">
   <meta name="description" content="Private, encrypted storage for your photos, videos and documents.">
   <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
@@ -132,7 +132,8 @@
 
   <input type="file" id="media-input" accept="image/*,video/*" multiple hidden>
   <input type="file" id="files-input" multiple hidden>
-  <input type="file" id="backup-input" accept=".pvault,application/octet-stream" hidden>
+  <!-- No accept filter: iOS greys out file types it doesn't recognise, such as .pvault. Files are checked on import. -->
+  <input type="file" id="backup-input" multiple hidden>
 
   <!-- Full-screen viewer -->
   <div id="viewer" class="viewer" hidden>

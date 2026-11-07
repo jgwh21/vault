@@ -3,12 +3,12 @@ import * as db from './db.js';
 import {
   addFile, listItems, readFile, readThumb, removeItem, updateItem, setThumb, loadFolders, saveFolders, typeOf, kindOf, extOf,
 } from './vault.js';
-import { buildBackup, importBackup, readBackupHeader } from './backup.js';
+import { planBackup, buildPart, importBackup, readBackupHeader } from './backup.js';
 import { makeThumb, renderPdf, videoFrameThumb } from './media.js';
 
 // Must equal VERSION in sw.js and the app-version meta tag in index.html;
 // `python build-upload.py --bump` updates all three, and the build refuses if they differ.
-const APP_VERSION = 'vault-v9';
+const APP_VERSION = 'vault-v10';
 
 const $ = (id) => document.getElementById(id);
 const MIN_PASS = 10;
@@ -93,11 +93,15 @@ function ask({ title, message = '', fields = [], ok = 'OK', danger = false, vali
   box.replaceChildren(...fields.map((f) => {
     const label = document.createElement('label');
     label.textContent = f.label;
-    const input = document.createElement('input');
-    input.type = f.type || 'text';
+    const input = document.createElement(f.options ? 'select' : 'input');
+    if (f.options) {
+      input.append(...f.options.map((o) => new Option(o.label, o.value)));
+    } else {
+      input.type = f.type || 'text';
+      input.autocomplete = 'off';
+      input.value = f.value || '';
+    }
     input.name = f.name;
-    input.autocomplete = 'off';
-    input.value = f.value || '';
     input.required = true;
     label.append(input);
     return label;
@@ -323,38 +327,74 @@ $('lock-btn').addEventListener('click', lock);
 // Restore from backup on a brand-new install
 $('restore-btn').addEventListener('click', () => pickFile($('backup-input')));
 
+// Several files can be chosen at once (all parts of a split backup, or several backups). They are
+// imported in name order, so parts go in sequence; parts missing from the selection are flagged.
 $('backup-input').addEventListener('change', async () => {
-  const file = $('backup-input').files[0];
-  if (!file) return;
+  const files = [...$('backup-input').files].sort((a, b) => byText(a.name, b.name));
+  if (!files.length) return;
+  const failed = [];
   try {
-    const { header } = await readBackupHeader(file);
+    const headers = [];
+    for (const file of files) {
+      try {
+        headers.push((await readBackupHeader(file)).header);
+      } catch (err) {
+        throw new Error(`${file.name}: ${err.message}`);
+      }
+    }
+    const sets = new Map();
+    for (const h of headers.filter((x) => x.set)) {
+      if (!sets.has(h.set)) sets.set(h.set, { parts: h.parts, have: new Set() });
+      sets.get(h.set).have.add(h.part);
+    }
+    const missing = [...sets.values()].flatMap((s) =>
+      Array.from({ length: s.parts }, (_, i) => i + 1).filter((p) => !s.have.has(p)));
+
     const fresh = !state.key;
+    const count = headers.reduce((s, h) => s + h.items, 0);
     const values = await ask({
       title: fresh ? 'Restore backup' : 'Import backup',
-      message: `Backup from ${fmtDate(header.created)} with ${header.items} item(s). Enter the passphrase the vault had when this backup was made.`,
+      message: (files.length === 1
+        ? `Backup from ${fmtDate(headers[0].created)} with ${count} item(s).`
+        : `${files.length} backup files with ${count} item(s).`)
+        + ' Enter the passphrase the vault had when the backup was made.'
+        + (missing.length ? `\n\nNot selected: part ${missing.join(', ')}. Items in those parts won't appear until you import them too.` : ''),
       fields: [{ name: 'pass', label: 'Backup passphrase', type: 'password' }],
       ok: fresh ? 'Restore' : 'Import',
     });
     if (!values) return;
+
+    let key = state.key;
+    let keyInfo = state.key ? state.keyInfo : null;
+    let added = 0, skipped = 0;
     await busy(async () => {
-      progress('Checking passphrase…', 0);
-      const result = await importBackup(file, {
-        passphrase: values.pass,
-        currentKey: state.key,
-        currentKeyInfo: state.key ? state.keyInfo : null,
-        onProgress: (f) => progress(fresh ? 'Restoring backup…' : 'Importing backup…', f, `${Math.round(f * 100)}%`),
-      });
-      if (fresh) {
-        await enter(result.key, result.keyInfo);
-        toast(`Restored ${result.added} item(s). Your passphrase is the backup's passphrase.`, 6000);
-      } else {
-        await refresh();
-        toast(`Imported ${result.added} item(s)${result.skipped ? `, ${result.skipped} already here` : ''}.`);
+      for (const [i, file] of files.entries()) {
+        const label = `${fresh ? 'Restoring' : 'Importing'} ${files.length > 1 ? `file ${i + 1} of ${files.length}` : 'backup'}…`;
+        progress(label, i / files.length, file.name);
+        try {
+          const result = await importBackup(file, {
+            passphrase: values.pass, currentKey: key, currentKeyInfo: keyInfo,
+            onProgress: (f) => progress(label, (i + f) / files.length, file.name),
+          });
+          key = result.key;
+          keyInfo = result.keyInfo;
+          added += result.added;
+          skipped += result.skipped;
+        } catch (err) {
+          if (!keyInfo) throw err; // nothing restored yet: report it as a whole
+          failed.push(`${file.name}: ${err instanceof WrongPassphrase ? 'wrong passphrase for this file' : err.message}`);
+        }
       }
+      if (fresh) await enter(key, keyInfo);
+      else await refresh();
     });
+    toast(fresh
+      ? `Restored ${added} item(s). Your passphrase is the backup's passphrase.`
+      : `Imported ${added} item(s)${skipped ? `, ${skipped} already here` : ''}.`, 6000);
   } catch (err) {
-    toast(err instanceof WrongPassphrase ? 'Wrong passphrase for that backup.' : err.message, 5000);
+    failed.push(err instanceof WrongPassphrase ? 'Wrong passphrase for that backup.' : err.message);
   }
+  if (failed.length) await ask({ title: 'Not everything was imported', message: failed.join('\n'), ok: 'OK' });
 });
 
 // ---------- auto-lock & privacy shield ----------
@@ -1215,38 +1255,87 @@ $('autolock').addEventListener('change', (e) => {
   try { localStorage.setItem('autoLockMs', e.target.value); } catch {}
 });
 
-$('export-btn').addEventListener('click', async () => {
-  if (!state.items.length) return toast('Nothing to back up yet.');
-  let backup;
-  try {
-    backup = await busy(() => buildBackup(state.keyInfo, (f) => progress('Preparing backup…', f)));
-  } catch (err) {
-    return ask({ title: 'Couldn\'t prepare the backup', message: errorText(err), ok: 'OK' });
-  }
-  const file = new File([backup.blob], `vault-backup-${new Date().toISOString().slice(0, 10)}.pvault`,
-    { type: 'application/octet-stream' });
-  // Sharing must start from a fresh tap on iOS, so ask once the file is ready, and retry on a new tap.
-  let title = 'Backup ready';
-  let message = `${backup.count} item(s), ${fmtSize(file.size)}. `
-    + (isTouch ? 'Choose "Save to Files" (or another place) in the next screen.' : 'It will be saved to your downloads.');
-  let ok = 'Save backup';
+/** Offer a prepared file for saving, retrying on a fresh tap if it fails. True once saved. */
+async function saveWithRetry(file, { title, message, ok }) {
   for (;;) {
+    // Sharing must start from a fresh tap on iOS, so the save starts inside the OK tap.
     const run = await askThenRun({ title, message, ok }, () => deliverNow(file));
-    if (!run) return;
+    if (!run) return false;
     try {
-      if (await run.result === 'cancelled') return;
+      return await run.result === 'saved';
     } catch (err) {
-      title = 'Backup not saved';
+      title = 'Not saved';
       message = `${errorText(err)}\n\nYour vault is fine. Tap Try again; if it keeps failing, note this message.`;
       ok = 'Try again';
-      continue;
     }
-    state.lastBackup = Date.now();
-    await db.set('meta', 'lastBackup', state.lastBackup);
-    renderBanner();
-    renderSettings();
-    return toast('Backup saved.');
   }
+}
+
+const totalSize = (list) => fmtSize(list.reduce((s, i) => s + i.size, 0));
+
+// Backups are saved in parts of about 200 MB, each prepared only after the previous one is saved,
+// so memory use stays small however large the vault is (a whole 3 GB vault at once crashes an iPhone).
+$('export-btn').addEventListener('click', async () => {
+  if (!state.items.length) return toast('Nothing to back up yet.');
+  const startedAt = Date.now();
+  let items = state.items;
+  let scope = '';
+  const newItems = state.items.filter((i) => i.added > state.lastBackup);
+  if (state.lastBackup && newItems.length && newItems.length < state.items.length) {
+    const choice = await ask({
+      title: 'Back up what?',
+      message: `Last backup: ${fmtDate(state.lastBackup)}. A "new items" backup only covers what was added since; keep the earlier backup too.`,
+      fields: [{ name: 'what', label: 'Include', options: [
+        { value: 'new', label: `New items only (${newItems.length}, ${totalSize(newItems)})` },
+        { value: 'all', label: `Everything (${state.items.length}, ${totalSize(state.items)})` },
+      ] }],
+      ok: 'Continue',
+    });
+    if (!choice) return;
+    if (choice.what === 'new') { items = newItems; scope = '-new'; }
+  }
+
+  const plan = planBackup(items);
+  const n = plan.parts.length;
+  const date = new Date(startedAt).toISOString().slice(0, 10);
+  const where = isTouch ? 'Choose "Save to Files" in the next screen' : 'It will be saved to your downloads';
+  for (let k = 0; k < n; k++) {
+    let file;
+    try {
+      const blob = await busy(() => buildPart(state.keyInfo, plan, k,
+        (f) => progress(n > 1 ? `Preparing part ${k + 1} of ${n}…` : 'Preparing backup…', f)));
+      const part = n > 1 ? `-part${String(k + 1).padStart(String(n).length, '0')}of${n}` : '';
+      file = new File([blob], `vault-backup-${date}${scope}${part}.pvault`, { type: 'application/octet-stream' });
+    } catch (err) {
+      return ask({ title: 'Couldn\'t prepare the backup', message: errorText(err), ok: 'OK' });
+    }
+    const saved = await saveWithRetry(file, n > 1 ? {
+      title: `Part ${k + 1} of ${n} ready`,
+      message: `${fmtSize(file.size)}. ${where}${isTouch ? ', and keep all parts in the same folder' : ''}.`,
+      ok: `Save part ${k + 1}`,
+    } : {
+      title: 'Backup ready',
+      message: `${items.length} item(s), ${fmtSize(file.size)}. ${where}.`,
+      ok: 'Save backup',
+    });
+    file = null; // release this part before preparing the next
+    if (!saved) {
+      if (k > 0) {
+        await ask({
+          title: 'Backup stopped',
+          message: `${k} of ${n} parts were saved. Restoring needs every part, so run Export again for a complete backup.`,
+          ok: 'OK',
+        });
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 300)); // give the browser a moment to free the saved part
+  }
+  state.lastBackup = startedAt;
+  await db.set('meta', 'lastBackup', state.lastBackup);
+  renderBanner();
+  renderSettings();
+  toast(n > 1 ? `Backup saved in ${n} parts.` : 'Backup saved.');
 });
 
 $('import-btn').addEventListener('click', () => pickFile($('backup-input')));
